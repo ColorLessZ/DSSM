@@ -2,6 +2,7 @@ import os
 import sys
 import logging
 import random
+import time
 
 import tensorflow as tf
 import numpy as np
@@ -9,6 +10,7 @@ import _pickle as cPickle
 import scipy.stats as ss
 
 from collections import OrderedDict
+from numpy.random import RandomState
 from sklearn.model_selection import KFold
 from dataprepare import load_data, build_vocab, get_idx_from_data
 
@@ -89,11 +91,9 @@ def calloss(feature_x, feature_y):
     with tf.name_scope('Loss'):
         # Train Loss
         # investigation on loss calculation
-        prob = tf.nn.softmax((cos_sim))
-        hit_prob = tf.slice(prob, [0, 0], [-1, 1])
-        loss = -tf.reduce_sum(tf.log(hit_prob)) / BS
-        tf.scalar_summary('loss', loss)
-    
+        prob = tf.nn.softmax((cos_sim)) 
+        hit_prob = tf.slice(prob, [0, 0], [-1, 1]) #P_Q_D+
+        loss = -tf.reduce_sum(tf.log(hit_prob)) / BS    
     return cos_sim, loss
 
 def training(loss, lrate):
@@ -107,13 +107,13 @@ def training(loss, lrate):
 
 def evaluation(cos_sim):
     with tf.name_scope('Evaluation'):
-        npts = cos_sim.shape[0]
+        npts = cos_sim.shape[0].value
     
     index_list = []
 
     ranks = np.zeros(npts)
     for index in range(npts):
-        orders = ss.rankdata(cos_sim[index].reshape(1,cos_sim.shape(1)))
+        orders = ss.rankdata(tf.reshape(cos_sim[index],[1,cos_sim.shape[1].value]))
         ranks[index] =  orders[0]
 
     # Compute metrics
@@ -179,14 +179,14 @@ def run_training(train, validation, test, n_char, max_len):
         #Add Ops that calculate and apply gradients.
         train_op = training(loss, LRATE)
 
-        #TODO: Ops of evaluation: r1+r3+r10
+        #Ops of evaluation: r1+r3+r10
         r1, r3, r10, medr, meanr,h_meanr = evaluation(cos_sim)
 
         #Build the summary tensor based ont he tf collection of summaries.
         summary = tf.summary.merge_all()
 
         #Add the variable initializer Op.
-        init = tf.hlobal_variables_initializer()
+        init = tf.global_variables_initializer()
 
         #Create a saver for writing training checkpoints.
         saver = tf.train.Saver()
@@ -208,13 +208,13 @@ def run_training(train, validation, test, n_char, max_len):
             num_samples = len(x_train)
             inds = np.arange(num_samples)
             prng.shuffle(inds)
-            batch_count = len(inds)/BS
+            batch_count = len(inds)//BS
 
             for mini_batch in range(batch_count):
                 start_time = time.time()
                 uidx += 1
-                x_minibatch = [x_train[seq] for seq in inds[minibatch::batch_count]]
-                y_minibatch = [y_train[seq] for seq in inds[minibatch::batch_count]]
+                x_minibatch = [x_train[seq] for seq in inds[mini_batch::batch_count]]
+                y_minibatch = [y_train[seq] for seq in inds[mini_batch::batch_count]]
                 feed_dict = fill_feed_dict(x_minibatch, y_minibatch, x_placeholder, y_placeholder)
 
                 _, loss_value = sess.run([train_op, loss], feed_dict=feed_dict)
