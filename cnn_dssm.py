@@ -33,13 +33,13 @@ def inference(x, y, n_chars):
     batch_size = x.shape[0].value
     max_len = x.shape[1].value
     with tf.name_scope('embedding'):
-        w_emb = tf.get_variable("char_embed", [n_chars , EMBEDDING])
+        w_emb = tf.get_variable("c_embed", [n_chars , EMBEDDING], trainable=False)
         
         x_flatten_emb = tf.transpose(tf.nn.embedding_lookup(w_emb,tf.cast(tf.reshape(x,[1,(x.shape[0]*x.shape[1]).value]), dtype='int32')))
         y_flatten_emb = tf.transpose(tf.nn.embedding_lookup(w_emb,tf.cast(tf.reshape(y,[1,(y.shape[0]*y.shape[1]).value]), dtype='int32')))
 
-        x_emb = tf.reshape(x_flatten_emb,[x.shape[0].value, 1, EMBEDDING, x.shape[1].value])
-        y_emb = tf.reshape(y_flatten_emb,[y.shape[0].value, 1, EMBEDDING, y.shape[1].value])
+        x_emb = tf.transpose(tf.reshape(x_flatten_emb,[x.shape[0].value, 1, EMBEDDING, x.shape[1].value]), [0, 2, 3, 1])
+        y_emb = tf.transpose(tf.reshape(y_flatten_emb,[y.shape[0].value, 1, EMBEDDING, y.shape[1].value]), [0, 2, 3, 1])
     
     with tf.name_scope('convLayers'):
         W_conv = OrderedDict()
@@ -50,7 +50,7 @@ def inference(x, y, n_chars):
 
         for i in range(len(FILTERS)):
             W_conv[i] = weight_variable([EMBEDDING, FILTERS[i], 1, FEATURE])
-            b_conv[i] = bias_variable([max_len])
+            b_conv[i] = bias_variable([FEATURE])
             cov_output_x[i] = tf.nn.relu(conv2d(x_emb, W_conv[i]) + b_conv[i])
             cov_output_y[i] = tf.nn.relu(conv2d(y_emb, W_conv[i]) + b_conv[i])
     
@@ -108,21 +108,21 @@ def training(loss, lrate):
 def evaluation(cos_sim):
     with tf.name_scope('Evaluation'):
         npts = cos_sim.shape[0].value
-    
-    index_list = []
-
-    ranks = np.zeros(npts)
+    r = []
     for index in range(npts):
-        orders = ss.rankdata(tf.reshape(cos_sim[index],[1,cos_sim.shape[1].value]))
-        ranks[index] =  orders[0]
-
+        top_value, top_indices = tf.nn.top_k(tf.reshape(cos_sim[index],[1,cos_sim.shape[1].value]), k=cos_sim.shape[1].value)
+        where = tf.where(tf.equal(top_indices, 0))
+        result = tf.segment_min(where[:, 1], where[:, 0])
+        r.append(result)
+                
     # Compute metrics
-    r1 = 100.0 * len(np.where(ranks < 1)[0]) / len(ranks)
-    r3 = 100.0 * len(np.where(ranks < 3)[0]) / len(ranks)
-    r10 = 100.0 * len(np.where(ranks < 10)[0]) / len(ranks)
-    medr = np.floor(np.median(ranks)) + 1
-    meanr = np.mean(ranks) + 1
-    h_meanr = 1./np.mean(1./(ranks+1))
+    ranks = tf.reshape(r,[1,len(r)])
+    r1 = 100 * tf.count_nonzero(tf.less(ranks, 1)) / ranks.shape[1].value
+    r3 = 100 * tf.count_nonzero(tf.less(ranks, 3)) / ranks.shape[1].value
+    r10 = 100 * tf.count_nonzero(tf.less(ranks, 10)) / ranks.shape[1].value
+    medr = tf.nn.top_k(ranks, ranks.shape[1].value//2).values[0][-1] + 1
+    meanr = tf.reduce_mean(ranks) + 1
+    h_meanr = 1/tf.reduce_mean(1/(ranks+1))
     return r1, r3, r10, medr, meanr,h_meanr
     
 def input_placeholder(batch_size, max_len):
@@ -138,9 +138,10 @@ def fill_feed_dict(x_minibatch, y_minibatch, x_placeholder, y_placeholder):
     return feed_dict
 
 def do_eval(sess,
-            r1,r3,r10,
+            r1, r3, r10, medr, meanr,h_meanr,
             x_placeholder,
             y_placeholder,
+            eidx,
             x,
             y):
   # Runs one evaluation against the full evaluation set
@@ -149,13 +150,15 @@ def do_eval(sess,
   num_samples = len(x)
   inds = np.arange(num_samples)
   prng.shuffle(inds)
-  batch_count = len(inds)/BS
+  batch_count = len(inds)//BS
 
   for mini_batch in range(batch_count):
+      x_minibatch = [x[seq] for seq in inds[mini_batch::batch_count]]
+      y_minibatch = [y[seq] for seq in inds[mini_batch::batch_count]]
       feed_dict = fill_feed_dict(x_minibatch, y_minibatch, x_placeholder, y_placeholder)
-      r1, r3, r10, medr, meanr,h_meanr = sess.run(evaluation, feed_dict=feed_dict)
-      print('Valid Rank: r1: %.f, r3: %.f, r10: %.f, medr: %d, meanr: %.f, h_meanr: %.f' % (r1, r3, r10, medr, meanr,h_meanr))
-  return r1+r3+r10
+      r_1, r_3, r_10, med_r, mean_r,h_mean_r = sess.run([r1, r3, r10, medr, meanr,h_meanr], feed_dict=feed_dict)
+      print('Valid Rank: r1: %.f, r3: %.f, r10: %.f, medr: %d, meanr: %.f, h_meanr: %.f' % (r_1, r_3, r_10, med_r, mean_r,h_mean_r))
+  return r_1+r_3+r_10
 
 def run_training(train, validation, test, n_char, max_len):
     x_train = np.array(train[0])
@@ -217,32 +220,35 @@ def run_training(train, validation, test, n_char, max_len):
                 y_minibatch = [y_train[seq] for seq in inds[mini_batch::batch_count]]
                 feed_dict = fill_feed_dict(x_minibatch, y_minibatch, x_placeholder, y_placeholder)
 
-                _, loss_value = sess.run([train_op, loss], feed_dict=feed_dict)
+                _, loss_value, cos = sess.run([train_op, loss, cos_sim], feed_dict=feed_dict)
+                print
                 duration = time.time() - start_time
 
                 #Write the summaries and print an overview
-                if np.mod(uidx, SUMMARY_FREQ):
-                    print('Epoch %d: loss = %.2f (%.3f sec)' % (edix, loss_value, duration))
+                if np.mod(uidx+1, SUMMARY_FREQ):
+                    print('Epoch %d: loss = %.2f (%.3f sec)' % (eidx, loss_value, duration))
                     summary_str = sess.run(summary, feed_dict = feed_dict)
-                    summary_writer.add_summary(summary_str, edix)
+                    summary_writer.add_summary(summary_str, eidx)
                     summary_writer.flush()
 
                 #Save checkpoint and evaluate the model periodically.
-                if np.mod(uidx, EVAL_FREQ):                    
+                if np.mod(uidx+1, EVAL_FREQ):                    
                     # Evaluate against the training set.
                     print('Training Data Eval:')
                     _ = do_eval(sess,
-                            r1, r3, r10,
+                            r1, r3, r10, medr, meanr,h_meanr,
                             x_placeholder,
                             y_placeholder,
+                            eidx,
                             x_train,
                             y_train)
                     # Evaluate against the validation set.                    
                     print('Validation Data Eval:')
                     r_at_10 = do_eval(sess,
-                                r1, r3, r10,
+                                r1, r3, r10, medr, meanr,h_meanr,
                                 x_placeholder,
                                 y_placeholder,
+                                eidx,
                                 x_validation,
                                 y_validation)
                     if r_at_10 > curr_score:
@@ -254,12 +260,13 @@ def run_training(train, validation, test, n_char, max_len):
                     # Evaluate against the test set.
                     print('Test Data Eval:')
                     do_eval(sess,
-                            r1, r3, r10,
+                            r1, r3, r10, medr, meanr,h_meanr,
                             x_placeholder,
                             y_placeholder,
+                            eidx,
                             x_test,
                             y_test)
-        return r1, r3, r10, medr, meanr,h_meanr 
+        return r1, r3, r10, medr, meanr, h_meanr,ranks
 
 def main(_):
     x, y, n_chars, max_len = load_data()
@@ -281,7 +288,7 @@ def main(_):
 
         train, valid = create_valid(train, valid_portion=VALIDATION_RATIO) 
         i += 1       
-        r1, r3, r10, medr, meanr,h_meanr = run_training(train, valid, test, n_chars, max_len)
+        r1, r3, r10, medr, meanr,h_meanr,ranks = run_training(train, valid, test, n_chars, max_len)
         print('cv %d: r1: %.f, r3: %.f, r10: %.f, medr: %d, meanr: %.f, h_meanr: %.f' % (i, r1, r3, r10, medr, meanr,h_meanr))
 
 def create_valid(train_set,valid_portion=VALIDATION_RATIO):
@@ -301,12 +308,12 @@ def create_valid(train_set,valid_portion=VALIDATION_RATIO):
 
     return train, valid
 
-def conv2d(x, W, format='NCHW'):
+def conv2d(x, W, format='NHWC'):
     """conv2d returns a 2d convolution layer with full stride."""
-    return tf.nn.conv2d(x, W, strides=[x.shape[0].value, 1, x.shape[2].value, 1], padding='SAME', data_format=format)
+    return tf.nn.conv2d(x, W, strides=[1, x.shape[1].value, 1, 1], padding='SAME', data_format=format)
 
-def max_pool(x,format='NCHW'):
-      return tf.nn.max_pool(x, ksize=[1, 1, 1, x.shape[3].value],strides=[1, 1, 1, x.shape[3].value], padding='SAME', data_format=format)
+def max_pool(x,format='NHWC'):
+      return tf.nn.max_pool(x, ksize=[1, 1, x.shape[2].value, 1],strides=[1, 1, x.shape[2].value, 1], padding='SAME', data_format=format)
 
 def weight_variable(shape, stddev=0.01):
   """weight_variable generates a weight variable of a given shape."""           
