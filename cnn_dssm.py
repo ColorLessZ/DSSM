@@ -15,7 +15,7 @@ from sklearn.model_selection import KFold
 from dataprepare import load_data, build_vocab, get_idx_from_data
 
 SAVEDRI="./model"
-MAX_EPOCHS = 20
+MAX_EPOCHS = 50
 SUMMARY_FREQ = 100
 EVAL_FREQ = 100
 BS = 100
@@ -70,19 +70,19 @@ def calloss(feature_x, feature_y):
     with tf.name_scope('FD_rotate'):
         # Rotate FD+ to produce 50 FD-
         temp = tf.tile(feature_y, [1, 1])
-
-        for i in range(NCON):
-            rand = int((random.random() + i) * BS / NCON)
-            feature_y = tf.concat([feature_y,
-                            tf.slice(temp, [rand, 0], [BS - rand, -1]),
-                            tf.slice(temp, [0, 0], [rand, -1])], 0)
+        y_feature = tf.slice(feature_y, [0, 0], [0, -1])
+        for i in range(BS):
+            rotation = tf.concat([tf.slice(temp, [i, 0], [BS - i, -1]), tf.slice(temp, [0, 0], [i, -1])], 0)
+            cy = random.sample(range(1,BS), NCON)
+            cy_rows = tf.gather(rotation, random.sample(range(1,BS), NCON))
+            y_feature = tf.concat([y_feature, tf.slice(rotation,[0,0],[1,-1]), cy_rows], 0)
 
     with tf.name_scope('Cosine_Similarity'):
         # Cosine similarity
         x_norm = tf.tile(tf.sqrt(tf.reduce_sum(tf.square(feature_x), 1, True)), [NCON + 1, 1])
-        y_norm = tf.sqrt(tf.reduce_sum(tf.square(feature_y), 1, True))
+        y_norm = tf.sqrt(tf.reduce_sum(tf.square(y_feature), 1, True))
 
-        prod = tf.reduce_sum(tf.multiply(tf.tile(feature_x, [NCON + 1, 1]), feature_y), 1, True)
+        prod = tf.reduce_sum(tf.multiply(tf.tile(feature_x, [NCON + 1, 1]), y_feature), 1, True)
         norm_prod = tf.multiply(x_norm, y_norm)
 
         cos_sim_raw = tf.truediv(prod, norm_prod)
@@ -195,7 +195,10 @@ def run_training(train, validation, test, n_char, max_len):
         saver = tf.train.Saver()
 
         #Create a session for running Ops on the Graph.
-        sess = tf.Session()
+        config = tf.ConfigProto()
+        #config.gpu_options.per_process_gpu_memory_fraction = 0.7
+        config.gpu_options.allow_growth = True
+        sess = tf.Session(config=config)
 
         #Instantiate a summery Writer to output summaries and the Graph
         summary_writer = tf.summary.FileWriter(SAVEDRI, sess.graph)
@@ -253,6 +256,7 @@ def run_training(train, validation, test, n_char, max_len):
                                 y_validation)
                     if r_at_10 > curr_score:
                         #TODO: lr decay
+                        curr_score = r_at_10
                         print('Save model.')
                         checkpoint_file = os.path.join(SAVEDRI, 'model.ckpt')
                         saver.save(sess, checkpoint_file, global_step=uidx)
@@ -266,10 +270,10 @@ def run_training(train, validation, test, n_char, max_len):
                             eidx,
                             x_test,
                             y_test)
-        return r1, r3, r10, medr, meanr, h_meanr,ranks
+        return r1, r3, r10, medr, meanr, h_meanr
 
 def main(_):
-    x, y, n_chars, max_len = load_data()
+    x, y, n_chars, max_len, char2ix, ix2char = load_data()
     kf = KFold(n_splits=FOLD_COUNT, shuffle=True, random_state=1234)
     results = []
     i = 0
@@ -288,8 +292,7 @@ def main(_):
 
         train, valid = create_valid(train, valid_portion=VALIDATION_RATIO) 
         i += 1       
-        r1, r3, r10, medr, meanr,h_meanr,ranks = run_training(train, valid, test, n_chars, max_len)
-        print('cv %d: r1: %.f, r3: %.f, r10: %.f, medr: %d, meanr: %.f, h_meanr: %.f' % (i, r1, r3, r10, medr, meanr,h_meanr))
+        r1, r3, r10, medr, meanr,h_meanr = run_training(train, valid, test, n_chars, max_len)
 
 def create_valid(train_set,valid_portion=VALIDATION_RATIO):
     

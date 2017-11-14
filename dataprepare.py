@@ -32,7 +32,7 @@ def load_data(path = './data/dataset.txt'):
     for t in text[1]:
         y.append(pad_or_truncate(t, max_len, 0))
     
-    return x, y, n_chars, max_len
+    return x, y, n_chars + 1, max_len,char2ix,ix2char
     
 def build_vocab(textA, textB):
     
