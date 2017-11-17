@@ -15,7 +15,7 @@ from sklearn.model_selection import KFold
 from dataprepare import load_data, build_vocab, get_idx_from_data
 
 SAVEDRI="./model"
-MAX_EPOCHS = 50
+MAX_EPOCHS = 20
 SUMMARY_FREQ = 100
 EVAL_FREQ = 100
 BS = 100
@@ -24,7 +24,7 @@ EMBEDDING = 128
 FILTERS = [2,3,4]
 NCON = 50
 GAMMA = 10
-LRATE = 0.0002
+LRATE = 0.001
 SEED = 1234
 VALIDATION_RATIO = 0.1
 FOLD_COUNT = 10
@@ -70,23 +70,22 @@ def calloss(feature_x, feature_y):
     with tf.name_scope('FD_rotate'):
         # Rotate FD+ to produce 50 FD-
         temp = tf.tile(feature_y, [1, 1])
+        x_feature = tf.tile(feature_x, [NCON + 1, 1])
         y_feature = tf.slice(feature_y, [0, 0], [0, -1])
         for i in range(BS):
             rotation = tf.concat([tf.slice(temp, [i, 0], [BS - i, -1]), tf.slice(temp, [0, 0], [i, -1])], 0)
-            cy = random.sample(range(1,BS), NCON)
             cy_rows = tf.gather(rotation, random.sample(range(1,BS), NCON))
-            y_feature = tf.concat([y_feature, tf.slice(rotation,[0,0],[1,-1]), cy_rows], 0)
-
+            y_feature = tf.concat([y_feature, tf.slice(rotation,[0,0],[1,-1]), cy_rows], 0)        
     with tf.name_scope('Cosine_Similarity'):
         # Cosine similarity
-        x_norm = tf.tile(tf.sqrt(tf.reduce_sum(tf.square(feature_x), 1, True)), [NCON + 1, 1])
+        x_norm = tf.sqrt(tf.reduce_sum(tf.square(x_feature), 1, True))
         y_norm = tf.sqrt(tf.reduce_sum(tf.square(y_feature), 1, True))
 
-        prod = tf.reduce_sum(tf.multiply(tf.tile(feature_x, [NCON + 1, 1]), y_feature), 1, True)
+        prod = tf.reduce_sum(tf.multiply(x_feature, y_feature), 1, True)
         norm_prod = tf.multiply(x_norm, y_norm)
 
         cos_sim_raw = tf.truediv(prod, norm_prod)
-        cos_sim = tf.transpose(tf.reshape(tf.transpose(cos_sim_raw), [NCON + 1, BS])) * GAMMA
+        cos_sim = tf.reshape(cos_sim_raw, [BS, NCON + 1]) * GAMMA
 
     with tf.name_scope('Loss'):
         # Train Loss
@@ -151,16 +150,32 @@ def do_eval(sess,
   inds = np.arange(num_samples)
   prng.shuffle(inds)
   batch_count = len(inds)//BS
-
+  rank1 =.0
+  rank3 = .0
+  rank10 = .0
+  med_rank = .0
+  mean_rank = .0
+  h_mean_rank=.0
   for mini_batch in range(batch_count):
       x_minibatch = [x[seq] for seq in inds[mini_batch::batch_count]]
       y_minibatch = [y[seq] for seq in inds[mini_batch::batch_count]]
       feed_dict = fill_feed_dict(x_minibatch, y_minibatch, x_placeholder, y_placeholder)
       r_1, r_3, r_10, med_r, mean_r,h_mean_r = sess.run([r1, r3, r10, medr, meanr,h_meanr], feed_dict=feed_dict)
-      print('Valid Rank: r1: %.f, r3: %.f, r10: %.f, medr: %d, meanr: %.f, h_meanr: %.f' % (r_1, r_3, r_10, med_r, mean_r,h_mean_r))
-  return r_1+r_3+r_10
+      rank1+=r_1
+      rank3+=r_3
+      rank10+=r_10
+      med_rank+=med_r
+      mean_rank+=mean_r
+      h_mean_rank+=h_mean_r
+  print('Valid Rank: r1: %.f, r3: %.f, r10: %.f, medr: %d, meanr: %.f, h_meanr: %.f' % (rank1/batch_count, rank3/batch_count, rank10/batch_count, med_rank/batch_count, mean_rank/batch_count,h_mean_rank/batch_count))
+  return (rank1+rank3+rank10)/batch_count
 
-def run_training(train, validation, test, n_char, max_len):
+def run_training(train, validation, test, n_char, max_len, iteration):
+
+    directory = SAVEDRI + '/' + str(iteration)
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+
     x_train = np.array(train[0])
     y_train = np.array(train[1])
     x_validation = np.array(validation[0])
@@ -224,29 +239,29 @@ def run_training(train, validation, test, n_char, max_len):
                 feed_dict = fill_feed_dict(x_minibatch, y_minibatch, x_placeholder, y_placeholder)
 
                 _, loss_value, cos = sess.run([train_op, loss, cos_sim], feed_dict=feed_dict)
-                print
+                
                 duration = time.time() - start_time
 
                 #Write the summaries and print an overview
                 if np.mod(uidx+1, SUMMARY_FREQ):
-                    print('Epoch %d: loss = %.2f (%.3f sec)' % (eidx, loss_value, duration))
+                    print('Iteration: %d: Epoch %d: loss = %.2f (%.3f sec)' % (iteration, eidx, loss_value, duration))
                     summary_str = sess.run(summary, feed_dict = feed_dict)
-                    summary_writer.add_summary(summary_str, eidx)
+                    summary_writer.add_summary(summary_str, uidx)
                     summary_writer.flush()
-
-                #Save checkpoint and evaluate the model periodically.
-                if np.mod(uidx+1, EVAL_FREQ):                    
                     # Evaluate against the training set.
-                    print('Training Data Eval:')
+                    print('Training Data Eval on iteration %d' % (iteration))
                     _ = do_eval(sess,
                             r1, r3, r10, medr, meanr,h_meanr,
                             x_placeholder,
                             y_placeholder,
                             eidx,
-                            x_train,
-                            y_train)
+                            x_minibatch,
+                            y_minibatch)
+
+                #Save checkpoint and evaluate the model periodically.
+                if np.mod(uidx+1, EVAL_FREQ):                                        
                     # Evaluate against the validation set.                    
-                    print('Validation Data Eval:')
+                    print('Validation Data Eval on iteration %d' % (iteration))
                     r_at_10 = do_eval(sess,
                                 r1, r3, r10, medr, meanr,h_meanr,
                                 x_placeholder,
@@ -255,14 +270,13 @@ def run_training(train, validation, test, n_char, max_len):
                                 x_validation,
                                 y_validation)
                     if r_at_10 > curr_score:
-                        #TODO: lr decay
                         curr_score = r_at_10
                         print('Save model.')
-                        checkpoint_file = os.path.join(SAVEDRI, 'model.ckpt')
+                        checkpoint_file = os.path.join(directory, 'model.ckpt')
                         saver.save(sess, checkpoint_file, global_step=uidx)
 
                     # Evaluate against the test set.
-                    print('Test Data Eval:')
+                    print('Test Data Eval on iteration %d' % (iteration))
                     do_eval(sess,
                             r1, r3, r10, medr, meanr,h_meanr,
                             x_placeholder,
@@ -292,7 +306,7 @@ def main(_):
 
         train, valid = create_valid(train, valid_portion=VALIDATION_RATIO) 
         i += 1       
-        r1, r3, r10, medr, meanr,h_meanr = run_training(train, valid, test, n_chars, max_len)
+        r1, r3, r10, medr, meanr,h_meanr = run_training(train, valid, test, n_chars, max_len, i)
 
 def create_valid(train_set,valid_portion=VALIDATION_RATIO):
     
