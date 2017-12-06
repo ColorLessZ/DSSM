@@ -76,7 +76,7 @@ def calloss(feature_x, feature_y, negtive_count, gamma, batch_size):
 def training(loss, lrate):
     with tf.name_scope('Training'):
         tf.summary.scalar('loss', loss)
-
+        # global_step = tf.train.get_or_create_global_step()
         global_step = tf.Variable(0, name='global_step', trainable=False)
         # Optimizer
         train_op = tf.train.AdamOptimizer(lrate).minimize(loss, global_step = global_step)
